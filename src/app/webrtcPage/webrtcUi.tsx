@@ -1,10 +1,15 @@
+import { useRouter } from 'expo-router';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, BackHandler, SafeAreaView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, BackHandler, PermissionsAndroid, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import InCallManager from 'react-native-incall-manager';
 import { mediaDevices, MediaStream, RTCPeerConnection, RTCSessionDescription, RTCView } from 'react-native-webrtc';
 import { useMqtt } from '../context/MqttContext';
+import SendMessagePopup from '../popups/SendMessagePopup';
 
 export default function WebRtcControlScreen() {
+    const router = useRouter();
+    
     useEffect(() => {
         // Lock to landscape when page loads
         async function lockOrientation() {
@@ -49,6 +54,99 @@ export default function WebRtcControlScreen() {
     }, []);
     const { publishMessage, isConnected, waitForAnswer } = useMqtt();
     const [localStream, setLocalStream] = useState(null);
+    const [videoEnabled, setVideoEnabled] = useState(true);
+    const [audioEnabled, setAudioEnabled] = useState(true);
+    const [sendMsgPopupState, setSendMsgPopupState] = useState(false);
+    const [audioOutput, setAudioOutput] = useState<'earpiece' | 'speaker'>('earpiece');
+
+    const cycleAudioOutput = async () => {
+        const nextOutput = audioOutput === 'earpiece' ? 'speaker' : 'earpiece';
+        
+        try {
+            // Use InCallManager to control speaker
+            if (nextOutput === 'speaker') {
+                InCallManager.setForceSpeakerphoneOn(true);
+                console.log('InCallManager: Speaker enabled');
+            } else {
+                InCallManager.setForceSpeakerphoneOn(false);
+                console.log('InCallManager: Speaker disabled (earpiece)');
+            }
+            
+            setAudioOutput(nextOutput);
+        } catch (e) {
+            console.log('Failed to set audio route:', e);
+        }
+    };
+
+    const getAudioOutputIcon = () => {
+        switch (audioOutput) {
+            case 'speaker':
+                return '🔊';
+            case 'earpiece':
+            default:
+                return '📱';
+        }
+    };
+
+    const toggleVideo = () => {
+        if (localStream) {
+            localStream.getVideoTracks().forEach(track => {
+                track.enabled = !videoEnabled;
+            });
+            setVideoEnabled(!videoEnabled);
+        }
+    };
+
+    const toggleAudio = () => {
+        if (localStream) {
+            localStream.getAudioTracks().forEach(track => {
+                track.enabled = !audioEnabled;
+            });
+            setAudioEnabled(!audioEnabled);
+        }
+    };
+
+    const endCall = () => {
+        console.log('Ending call and cleaning up resources...');
+        
+        // Stop InCallManager
+        try {
+            InCallManager.stop();
+            console.log('InCallManager stopped');
+        } catch (e) {
+            console.log('InCallManager stop warning:', e);
+        }
+        
+        // Close peer connection
+        if (peerConnectionRef.current != null) {
+            peerConnectionRef.current.close();
+            peerConnectionRef.current = null;
+            console.log('Peer connection closed');
+        }
+        
+        // Stop and release local stream tracks
+        if (localStream) {
+            localStream.getTracks().forEach(track => {
+                track.stop();
+                console.log(`Stopped track: ${track.kind}`);
+            });
+            setLocalStream(null);
+            console.log('Local stream released');
+        }
+        
+        // Clear remote stream
+        setRemoteMediaStream(null);
+        console.log('Remote stream cleared');
+        
+        // Reset UI state
+        setConnectionStatus('');
+        setVideoEnabled(true);
+        setAudioEnabled(true);
+        
+        // Navigate back to first screen
+        console.log('Navigating back to home screen');
+        router.replace('/');
+    };
 
     const sendOffer = (offerDescription: JSON) => {
         // Send the offerDescription to the other participant via your signaling server or MQTT
@@ -64,10 +162,58 @@ export default function WebRtcControlScreen() {
     const start = async () => {
         if (!localStream) {
             try {
-                const s = await mediaDevices.getUserMedia({
-                    audio: false,
+                // Configure audio using InCallManager
+                try {
+                    // Start InCallManager for media type (video call)
+                    InCallManager.start({ media: 'video' });
+                    // Enable speaker by default
+                    InCallManager.setForceSpeakerphoneOn(true);
+                    setAudioOutput('speaker');
+                    console.log('InCallManager started with speaker enabled');
+                } catch (audioErr) {
+                    console.log('InCallManager configuration warning:', audioErr);
+                }
+
+                // Request audio permission on Android
+                if (Platform.OS === 'android') {
+                    try {
+                        const granted = await PermissionsAndroid.request(
+                            PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+                            {
+                                title: 'Microphone Permission',
+                                message: 'This app needs access to your microphone for voice communication.',
+                                buttonNeutral: 'Ask Me Later',
+                                buttonNegative: 'Cancel',
+                                buttonPositive: 'OK',
+                            }
+                        );
+                        console.log('Microphone permission:', granted);
+                        if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
+                            console.warn('Microphone permission denied');
+                        }
+                    } catch (err) {
+                        console.warn('Error requesting microphone permission:', err);
+                    }
+                }
+
+                // Audio constraints - explicitly request audio capture
+                const audioConstraints = {
+                    audio: {
+                        echoCancellation: false,
+                        noiseSuppression: false,
+                        autoGainControl: false,
+                    } as any,
                     video: { facingMode: 'user' }
+                };
+                
+                console.log('Requesting media with constraints:', JSON.stringify(audioConstraints));
+                const s = await mediaDevices.getUserMedia(audioConstraints);
+                
+                // Log track info for debugging
+                s.getTracks().forEach(track => {
+                    console.log(`Track: kind=${track.kind}, enabled=${track.enabled}, readyState=${track.readyState}`);
                 });
+                
                 setLocalStream(s);
 
                 const peerConstraints = {
@@ -211,7 +357,7 @@ export default function WebRtcControlScreen() {
     };
 
     return (
-        <SafeAreaView style={styles.container}>
+        <View style={styles.container}>
             {remoteMediaStream && (
                 <View style={styles.videoContainer}>
                     <RTCView
@@ -219,6 +365,42 @@ export default function WebRtcControlScreen() {
                         style={styles.remoteView}
                         objectFit="cover"
                     />
+                    <View style={styles.buttonOverlay}>
+                        <TouchableOpacity
+                            style={[styles.controlButton, !videoEnabled && styles.buttonDisabled]}
+                            onPress={toggleVideo}
+                        >
+                            <Text style={styles.buttonIcon}>
+                                {videoEnabled ? '📹' : '🚫'}
+                            </Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                            style={[styles.controlButton, !audioEnabled && styles.buttonDisabled]}
+                            onPress={toggleAudio}
+                        >
+                            <Text style={styles.buttonIcon}>
+                                {audioEnabled ? '🎤' : '🔇'}
+                            </Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                            style={[styles.controlButton, styles.endCallButton]}
+                            onPress={endCall}
+                        >
+                            <Text style={styles.buttonIcon}>📞</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                            style={styles.controlButton}
+                            onPress={() => setSendMsgPopupState(true)}
+                        >
+                            <Text style={styles.buttonIcon}>💬</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                            style={styles.controlButton}
+                            onPress={cycleAudioOutput}
+                        >
+                            <Text style={styles.buttonIcon}>{getAudioOutputIcon()}</Text>
+                        </TouchableOpacity>
+                    </View>
                 </View>
             )}
             {connectionStatus !== '' && (
@@ -229,7 +411,11 @@ export default function WebRtcControlScreen() {
                     </View>
                 </View>
             )}
-        </SafeAreaView>
+            <SendMessagePopup
+                show={sendMsgPopupState}
+                onClose={() => setSendMsgPopupState(false)}
+            />
+        </View>
     );
 }
 
@@ -248,6 +434,30 @@ const styles = StyleSheet.create({
     remoteView: {
         width: '100%',
         height: '100%',
+    },
+    buttonOverlay: {
+        position: 'absolute',
+        top: 20,
+        right: 20,
+        flexDirection: 'row',
+        gap: 10,
+    },
+    controlButton: {
+        width: 48,
+        height: 48,
+        borderRadius: 8,
+        backgroundColor: 'rgba(0, 0, 0, 0.6)',
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    buttonDisabled: {
+        backgroundColor: 'rgba(255, 0, 0, 0.6)',
+    },
+    endCallButton: {
+        backgroundColor: 'rgba(220, 20, 20, 0.8)',
+    },
+    buttonIcon: {
+        fontSize: 20,
     },
     buttonContainer: {
         padding: 20,
