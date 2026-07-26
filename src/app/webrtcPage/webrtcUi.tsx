@@ -199,26 +199,35 @@ export default function WebRtcControlScreen() {
                     InCallManager.setMicrophoneMute(false);
                     setAudioOutput('speaker');
                     console.log('InCallManager started with speaker and microphone enabled');
+                    
+                    // Wait a moment for audio session to stabilize
+                    await new Promise(resolve => setTimeout(resolve, 500));
                 } catch (audioErr) {
                     console.log('InCallManager configuration warning:', audioErr);
                 }
 
-                // Audio constraints - explicitly request audio capture
-                const audioConstraints = {
-                    audio: {
-                        echoCancellation: false,
-                        noiseSuppression: false,
-                        autoGainControl: false,
-                    } as any,
+                // Audio constraints - use simple true for audio (more reliable on Android)
+                const mediaConstraints = {
+                    audio: true,
                     video: { facingMode: 'user' }
                 };
                 
-                console.log('Requesting media with constraints:', JSON.stringify(audioConstraints));
-                const s = await mediaDevices.getUserMedia(audioConstraints);
+                console.log('Requesting media with constraints:', JSON.stringify(mediaConstraints));
+                const s = await mediaDevices.getUserMedia(mediaConstraints);
                 
-                // Log track info for debugging
+                // Log detailed track info for debugging
                 s.getTracks().forEach(track => {
-                    console.log(`Track: kind=${track.kind}, enabled=${track.enabled}, readyState=${track.readyState}`);
+                    console.log(`Track: kind=${track.kind}, enabled=${track.enabled}, readyState=${track.readyState}, id=${track.id}`);
+                    if (track.kind === 'audio') {
+                        const settings = track.getSettings?.();
+                        console.log('Audio track settings:', JSON.stringify(settings));
+                    }
+                });
+                
+                // Ensure audio track is enabled
+                s.getAudioTracks().forEach(track => {
+                    track.enabled = true;
+                    console.log(`Audio track ${track.id} explicitly enabled`);
                 });
                 
                 setLocalStream(s);
@@ -506,13 +515,15 @@ const styles = StyleSheet.create({
     },
     joystickContainer: {
         position: 'absolute',
-        bottom: 20,
+        top: '50%',
         left: 20,
+        marginTop: -75,
         width: 150,
         height: 150,
         borderRadius: 75,
-        backgroundColor: 'rgba(0, 0, 0, 0.3)',
+        backgroundColor: 'rgba(0, 0, 0, 0.15)',
         justifyContent: 'center',
         alignItems: 'center',
+        opacity: 0.6,
     },
 });
