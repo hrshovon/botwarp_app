@@ -1,11 +1,14 @@
+import { ReactNativeJoystick } from "@korsolutions/react-native-joystick";
 import { useRouter } from 'expo-router';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, BackHandler, PermissionsAndroid, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { GestureHandlerRootView } from "react-native-gesture-handler";
 import InCallManager from 'react-native-incall-manager';
 import { mediaDevices, MediaStream, RTCPeerConnection, RTCSessionDescription, RTCView } from 'react-native-webrtc';
 import { useMqtt } from '../context/MqttContext';
 import SendMessagePopup from '../popups/SendMessagePopup';
+
 
 export default function WebRtcControlScreen() {
     const router = useRouter();
@@ -162,19 +165,7 @@ export default function WebRtcControlScreen() {
     const start = async () => {
         if (!localStream) {
             try {
-                // Configure audio using InCallManager
-                try {
-                    // Start InCallManager for media type (video call)
-                    InCallManager.start({ media: 'video' });
-                    // Enable speaker by default
-                    InCallManager.setForceSpeakerphoneOn(true);
-                    setAudioOutput('speaker');
-                    console.log('InCallManager started with speaker enabled');
-                } catch (audioErr) {
-                    console.log('InCallManager configuration warning:', audioErr);
-                }
-
-                // Request audio permission on Android
+                // Request audio permission on Android FIRST (before InCallManager)
                 if (Platform.OS === 'android') {
                     try {
                         const granted = await PermissionsAndroid.request(
@@ -190,10 +181,26 @@ export default function WebRtcControlScreen() {
                         console.log('Microphone permission:', granted);
                         if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
                             console.warn('Microphone permission denied');
+                            return; // Exit if permission not granted
                         }
                     } catch (err) {
                         console.warn('Error requesting microphone permission:', err);
+                        return;
                     }
+                }
+
+                // Configure audio using InCallManager AFTER permission is granted
+                try {
+                    // Start InCallManager for media type (video call)
+                    InCallManager.start({ media: 'video', auto: true });
+                    // Enable speaker by default
+                    InCallManager.setForceSpeakerphoneOn(true);
+                    // Explicitly ensure microphone is NOT muted
+                    InCallManager.setMicrophoneMute(false);
+                    setAudioOutput('speaker');
+                    console.log('InCallManager started with speaker and microphone enabled');
+                } catch (audioErr) {
+                    console.log('InCallManager configuration warning:', audioErr);
                 }
 
                 // Audio constraints - explicitly request audio capture
@@ -268,6 +275,8 @@ export default function WebRtcControlScreen() {
                             setConnectionStatus('Connecting...');
                             break;
                         case 'connected':
+                            setConnectionStatus('Connected');
+                            break;
                         case 'completed':
                             setConnectionStatus('');
                             break;
@@ -401,9 +410,14 @@ export default function WebRtcControlScreen() {
                             <Text style={styles.buttonIcon}>{getAudioOutputIcon()}</Text>
                         </TouchableOpacity>
                     </View>
+                    <View style={styles.joystickContainer}>
+                        <GestureHandlerRootView style={styles.container}>
+                            <ReactNativeJoystick radius={50} onMove={(data) => console.log('Joystick:', data)} />
+                        </GestureHandlerRootView>
+                    </View>
                 </View>
             )}
-            {connectionStatus !== '' && (
+            {connectionStatus !== '' && connectionStatus !== 'Connected' && (
                 <View style={styles.statusOverlay}>
                     <View style={styles.statusPopup}>
                         <ActivityIndicator size="small" color="#fff" style={styles.spinner} />
@@ -489,5 +503,16 @@ const styles = StyleSheet.create({
         fontSize: 16,
         fontWeight: '500',
         textAlign: 'center',
+    },
+    joystickContainer: {
+        position: 'absolute',
+        bottom: 20,
+        left: 20,
+        width: 150,
+        height: 150,
+        borderRadius: 75,
+        backgroundColor: 'rgba(0, 0, 0, 0.3)',
+        justifyContent: 'center',
+        alignItems: 'center',
     },
 });
